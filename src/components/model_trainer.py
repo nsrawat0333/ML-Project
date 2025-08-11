@@ -1,0 +1,154 @@
+import os
+import sys
+from dataclasses import dataclass
+
+from catboost import CatBoostRegressor
+from sklearn.ensemble import (
+    AdaBoostRegressor,
+    GradientBoostingRegressor,
+    RandomForestRegressor,
+)
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
+from sklearn.model_selection import GridSearchCV
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.tree import DecisionTreeRegressor
+from xgboost import XGBRegressor
+
+from src.exception import CustomException
+from src.logger import logging
+from src.utils import save_object, evaluate_models
+
+@dataclass
+class ModelTrainerConfig:
+    trained_model_file_path=os.path.join("artifacts","model.pkl")
+
+class ModelTrainer:
+    def __init__(self):
+        self.model_trainer_config=ModelTrainerConfig()
+
+    def initiate_model_trainer(self,train_array,test_array):
+        try:
+            logging.info("split training and test data")
+            x_train, y_train, x_test, y_test=(
+                train_array[:,:-1],
+                train_array[:,-1],
+                test_array[:,:-1],
+                test_array[:,-1]
+            )
+            models={
+                "Random Forest": RandomForestRegressor(),
+                "Decision Tree": DecisionTreeRegressor(),
+                "Gradient Boosting": GradientBoostingRegressor(),
+                "Linear Regression": LinearRegression(),
+                "XGBRegressor": XGBRegressor(),
+                "CatBoosting Regressor": CatBoostRegressor(verbose=False),
+                "AdaBoost Regressor": AdaBoostRegressor(),
+                "K-Neighbors Regressor": KNeighborsRegressor(),
+            }
+
+            # Define hyperparameter grids for each model
+            params = {
+                "Decision Tree": {
+                    'criterion': ['squared_error', 'friedman_mse', 'absolute_error', 'poisson'],
+                    # 'splitter': ['best','random'],
+                    # 'max_features': ['sqrt','log2'],
+                },
+                "Random Forest": {
+                    # 'criterion': ['squared_error', 'friedman_mse', 'absolute_error', 'poisson'],
+                    # 'max_features': ['sqrt','log2',None],
+                    'n_estimators': [8, 16, 32, 64, 128, 256]
+                },
+                "Gradient Boosting": {
+                    # 'loss': ['squared_error', 'huber', 'absolute_error', 'quantile'],
+                    'learning_rate': [.1, .01, .05, .001],
+                    'subsample': [0.6, 0.7, 0.75, 0.8, 0.85, 0.9],
+                    # 'criterion': ['squared_error', 'friedman_mse'],
+                    # 'max_features': ['auto','sqrt','log2'],
+                    'n_estimators': [8, 16, 32, 64, 128, 256]
+                },
+                "Linear Regression": {},
+                "XGBRegressor": {
+                    'learning_rate': [.1, .01, .05, .001],
+                    'n_estimators': [8, 16, 32, 64, 128, 256]
+                },
+                "CatBoosting Regressor": {
+                    'depth': [6, 8, 10],
+                    'learning_rate': [0.01, 0.05, 0.1],
+                    'iterations': [30, 50, 100]
+                },
+                "AdaBoost Regressor": {
+                    'learning_rate': [.1, .01, 0.5, .001],
+                    # 'loss': ['linear','square','exponential'],
+                    'n_estimators': [8, 16, 32, 64, 128, 256]
+                },
+                "K-Neighbors Regressor": {
+                    'n_neighbors': [5, 7, 9, 11],
+                    # 'weights': ['uniform','distance'],
+                    # 'algorithm': ['ball_tree','kd_tree','brute']
+                }
+            }
+
+            # Evaluate all models with hyperparameter tuning
+            logging.info("Evaluating all models with hyperparameter tuning")
+            model_report = evaluate_models(
+                X_train=x_train, 
+                y_train=y_train, 
+                X_test=x_test, 
+                y_test=y_test, 
+                models=models,
+                params=params
+            )
+            
+            # Log model performance
+            for model_name, score in model_report.items():
+                logging.info(f"{model_name}: R2 Score = {score:.4f}")
+            
+            # Find the best performing model
+            best_model_score = max(sorted(model_report.values()))
+            best_model_name = list(model_report.keys())[
+                list(model_report.values()).index(best_model_score)
+            ]
+            
+            logging.info(f"Best model: {best_model_name} with R2 score: {best_model_score:.4f}")
+            
+            # Check if best model meets minimum performance threshold
+            if best_model_score < 0.6:
+                raise CustomException("No best model found with R2 score > 0.6")
+            
+            # Get the best model object and retrain it with best parameters
+            best_model = models[best_model_name]
+            best_params = params.get(best_model_name, {})
+            
+            if best_params:
+                # Perform GridSearchCV to get the best model with tuned parameters
+                grid_search = GridSearchCV(
+                    estimator=best_model, 
+                    param_grid=best_params, 
+                    cv=3, 
+                    scoring='r2',
+                    n_jobs=-1
+                )
+                grid_search.fit(x_train, y_train)
+                best_model = grid_search.best_estimator_
+                logging.info(f"Best parameters for {best_model_name}: {grid_search.best_params_}")
+            else:
+                best_model.fit(x_train, y_train)
+            
+            # Save the best model
+            logging.info(f"Saving best model: {best_model_name}")
+            save_object(
+                file_path=self.model_trainer_config.trained_model_file_path,
+                obj=best_model
+            )
+            
+            # Final prediction on test set
+            predicted = best_model.predict(x_test)
+            final_r2_score = r2_score(y_test, predicted)
+            
+            logging.info(f"Final model performance - R2 Score: {final_r2_score:.4f}")
+            
+            return final_r2_score
+
+        except Exception as e:
+            raise CustomException(e,sys)
